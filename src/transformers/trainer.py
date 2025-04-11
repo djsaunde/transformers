@@ -2619,6 +2619,7 @@ class Trainer:
                             epoch,
                             ignore_keys_for_eval,
                             start_time,
+                            num_items_in_batch,
                             learning_rate=learning_rate,
                         )
                     else:
@@ -2646,7 +2647,15 @@ class Trainer:
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(
-                tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate
+                tr_loss,
+                grad_norm,
+                model,
+                trial,
+                epoch,
+                ignore_keys_for_eval,
+                start_time,
+                num_items_in_batch,
+                learning_rate=learning_rate,
             )
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
@@ -3050,7 +3059,16 @@ class Trainer:
         return metrics
 
     def _maybe_log_save_evaluate(
-        self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None
+        self,
+        tr_loss,
+        grad_norm,
+        model,
+        trial,
+        epoch,
+        ignore_keys_for_eval,
+        start_time,
+        num_items_in_batch,
+        learning_rate=None,
     ):
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
             if is_torch_xla_available():
@@ -3058,8 +3076,18 @@ class Trainer:
 
             logs: dict[str, float] = {}
 
-            # all_gather + mean() to get average loss over all processes
-            tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
+            # Gather loss and num_items_in_batch from all processes
+            tr_loss_gathered = self._nested_gather(tr_loss)
+            num_items_gathered = self._nested_gather(num_items_in_batch)
+
+            # Calculate total items across all ranks
+            total_items = num_items_gathered.sum().item()
+
+            # Weight loss by the number of items in each batch
+            if total_items > 0:
+                tr_loss_scalar = (tr_loss_gathered * num_items_gathered).sum().item() / total_items
+            else:
+                tr_loss_scalar = tr_loss_gathered.mean().item()  # Fallback to simple mean if total_items is 0
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
